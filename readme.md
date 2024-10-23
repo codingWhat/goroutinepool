@@ -24,22 +24,40 @@ tips: inspired by fast-http、ants
 定期扫描ready数组，由于ready数组是FIFO模式, 因此可以采用二分查找快速定位空闲超时的worker.
 ![img_2.png](img_2.png)
 ## Example:
+
+```shell
+go get github.com/codingWhat/goroutinepool
 ```
-customFunc := func(a any) error {
-    defer wg.Done()
 
-        i := a.(int)
-        sum.Add(int32(i))
-        return nil
-}
-    
-var sum atomic.Int32
-num := 1000
-p := NewWithFunc(100, customFunc)
-defer p.Release()
-for i := 1; i < num; i++ {
-    p.Invoke(i)
-}
+```golang
+package main
 
-time.Sleep(10 * time.Second)
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/codingWhat/goroutinepool"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	var sum atomic.Int32
+	num := 1000
+	wg.Add(num - 1)
+	customFunc := func(a any) error {
+		defer wg.Done()
+		i := a.(int)
+		sum.Add(int32(i))
+		return nil
+	}
+	p := goroutinepool.NewWithFunc(100, customFunc)
+	defer p.Release()
+	for i := 1; i < num; i++ {
+		p.Invoke(i)
+	}
+	time.Sleep(3 * time.Second)
+	fmt.Printf("1 + %d = %d \n", num, sum.Load())
+}	
 ```
