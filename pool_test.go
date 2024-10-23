@@ -1,7 +1,6 @@
 package goroutinepool
 
 import (
-	"fmt"
 	"github.com/stretchr/testify/assert"
 	"runtime"
 	"sync"
@@ -33,7 +32,7 @@ func TestNewWithFunc(t *testing.T) {
 		p.Invoke(i)
 	}
 	wg.Wait()
-	fmt.Println("sum----->", sum.Load())
+	assert.Equal(t, sum.Load(), int32(499500))
 }
 
 func TestNewWithFunc_Purge(t *testing.T) {
@@ -43,7 +42,6 @@ func TestNewWithFunc_Purge(t *testing.T) {
 	wg.Add(num - 1)
 	custom := func(a any) error {
 		defer wg.Done()
-
 		i := a.(int)
 		sum.Add(int32(i))
 		return nil
@@ -55,8 +53,7 @@ func TestNewWithFunc_Purge(t *testing.T) {
 		p.Invoke(i)
 	}
 	wg.Wait()
-
-	time.Sleep(6 * time.Second)
+	time.Sleep(5 * time.Second)
 	assert.Equal(t, p.Running(), 0)
 }
 

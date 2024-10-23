@@ -47,14 +47,14 @@ type poolManager struct {
 	isStopped atomic.Bool
 	stopSig   chan struct{}
 
-	curWorkers int
-	maxWorkers int
+	curWorkers atomic.Int32
+	maxWorkers int32
 }
 
 func NewWithFunc(size int, tf TaskFunc, options ...Option) Pool {
 	p := &poolManager{
 		pool:              sync.Pool{New: func() any { return &worker{ch: make(chan any, workerChanCap)} }},
-		maxWorkers:        size,
+		maxWorkers:        int32(size),
 		fn:                tf,
 		workerMaxIdleTime: 1 * time.Minute,
 		stopSig:           make(chan struct{}),
@@ -70,9 +70,9 @@ func NewWithFunc(size int, tf TaskFunc, options ...Option) Pool {
 	return p
 }
 func (p *poolManager) Running() int {
-	p.mu.Lock()
+	p.mu.RLock()
 	num := len(p.ready)
-	p.mu.Unlock()
+	p.mu.RUnlock()
 	return num
 }
 func (p *poolManager) runWorker(w *worker) {
@@ -91,13 +91,10 @@ func (p *poolManager) runWorker(w *worker) {
 		}
 		p.toReady(w)
 	}
-	p.mu.Lock()
-	p.curWorkers--
-	curWorkers := p.curWorkers
-	p.mu.Unlock()
 
+	p.curWorkers.Add(-1)
 	//放入池子
-	if curWorkers >= p.maxWorkers {
+	if p.curWorkers.Load() >= p.maxWorkers {
 		return
 	}
 	p.pool.Put(w)
@@ -112,23 +109,18 @@ func (p *poolManager) toReady(w *worker) {
 
 func (p *poolManager) getWorker() *worker {
 
-	p.mu.Lock()
+	p.mu.RLock()
 	available := len(p.ready)
-	p.mu.Unlock()
+	p.mu.RUnlock()
 	var w *worker
 	if available == 0 {
 		//说明用完了，重新创建worker
-		p.mu.Lock()
-		if p.curWorkers < p.maxWorkers {
+		if p.curWorkers.Load() < p.maxWorkers {
 			w = p.pool.Get().(*worker)
-			p.curWorkers++
-			p.mu.Unlock()
-			go func() {
-				p.runWorker(w)
-			}()
+			p.curWorkers.Add(1)
+			go p.runWorker(w)
 			return w
 		} else {
-			p.mu.Unlock()
 			//上层重试
 			return nil
 		}
@@ -172,10 +164,10 @@ func WithRecovery(fn func()) {
 func (p *poolManager) clean(scratch *[]*worker) {
 	cleanTime := time.Now().Add(-p.workerMaxIdleTime)
 
-	p.mu.Lock()
+	p.mu.RLock()
 	n := len(p.ready)
 	if n == 0 {
-		p.mu.Unlock()
+		p.mu.RUnlock()
 		return
 	}
 	lo := 0
@@ -188,12 +180,13 @@ func (p *poolManager) clean(scratch *[]*worker) {
 			lo = mid
 		}
 	}
-
 	if p.ready[lo].lastUseTime.After(cleanTime) {
-		p.mu.Unlock()
+		p.mu.RUnlock()
 		return
 	}
+	p.mu.RUnlock()
 
+	p.mu.Lock()
 	//更新原切片，包括头信息中的长度
 	*scratch = append((*scratch)[:0], p.ready[0:hi+1]...)
 	m := copy(p.ready, p.ready[hi+1:])
@@ -230,5 +223,5 @@ func (p *poolManager) Release() {
 	}
 
 	p.ready = nil
-	p.curWorkers = 0
+	p.curWorkers.Store(0)
 }
