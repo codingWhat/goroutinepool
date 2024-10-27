@@ -42,42 +42,61 @@ type poolManager struct {
 	pool              sync.Pool
 	workerMaxIdleTime time.Duration
 	ready             []*worker
+	blocking          int32
+	running           int32
 	mu                sync.RWMutex
+	cond              *sync.Cond
 
 	isStopped atomic.Bool
 	stopSig   chan struct{}
 
-	curWorkers atomic.Int32
-	maxWorkers int32
+	maxWorkers int
 }
 
 func NewWithFunc(size int, tf TaskFunc, options ...Option) Pool {
 	p := &poolManager{
 		pool:              sync.Pool{New: func() any { return &worker{ch: make(chan any, workerChanCap)} }},
-		maxWorkers:        int32(size),
+		maxWorkers:        size,
 		fn:                tf,
 		workerMaxIdleTime: 1 * time.Minute,
 		stopSig:           make(chan struct{}),
-		ready:             make([]*worker, 0, size),
 	}
 
 	for _, op := range options {
 		op(p)
 	}
 
+	p.cond = sync.NewCond(&p.mu)
+
 	go WithRecovery(p.start)
 
 	return p
 }
+
 func (p *poolManager) Running() int {
-	p.mu.RLock()
-	num := len(p.ready)
-	p.mu.RUnlock()
-	return num
+	return int(atomic.LoadInt32(&p.running))
 }
+func (p *poolManager) incRunning() {
+	atomic.AddInt32(&p.running, 1)
+}
+
+// decRunning decreases the number of the currently running goroutines.
+func (p *poolManager) decRunning() {
+	atomic.AddInt32(&p.running, -1)
+}
+
 func (p *poolManager) runWorker(w *worker) {
+
+	p.incRunning()
+	defer func() {
+		p.decRunning()
+	}()
+
 	for v := range w.ch {
 		if v == nil {
+			break
+		}
+		if p.isStopped.Load() {
 			break
 		}
 
@@ -85,16 +104,11 @@ func (p *poolManager) runWorker(w *worker) {
 		if err != nil {
 			log.Printf("worker executing happened err:%+v", err)
 		}
-
-		if p.isStopped.Load() {
-			break
-		}
 		p.toReady(w)
 	}
 
-	p.curWorkers.Add(-1)
 	//放入池子
-	if p.curWorkers.Load() >= p.maxWorkers {
+	if p.Running() >= p.maxWorkers {
 		return
 	}
 	p.pool.Put(w)
@@ -104,34 +118,42 @@ func (p *poolManager) toReady(w *worker) {
 	w.lastUseTime = time.Now()
 	p.mu.Lock()
 	p.ready = append(p.ready, w)
+	p.cond.Signal()
 	p.mu.Unlock()
 }
 
 func (p *poolManager) getWorker() *worker {
 
-	p.mu.RLock()
-	available := len(p.ready)
-	p.mu.RUnlock()
+	p.mu.Lock()
+	n := len(p.ready) - 1
 	var w *worker
-	if available == 0 {
+	//有空闲
+	if n >= 0 {
+		w = p.ready[n]
+		p.ready[n] = nil
+		p.ready = p.ready[:n]
+		p.mu.Unlock()
 		//说明用完了，重新创建worker
-		if p.curWorkers.Load() < p.maxWorkers {
-			w = p.pool.Get().(*worker)
-			p.curWorkers.Add(1)
-			go p.runWorker(w)
-			return w
-		} else {
-			//上层重试
-			return nil
+	} else if p.Running() < p.maxWorkers {
+		p.mu.Unlock()
+		w = p.pool.Get().(*worker)
+		go p.runWorker(w)
+	} else {
+		//阻塞等待
+	Reentry:
+		p.blocking++
+		p.cond.Wait()
+		p.blocking--
+		l := len(p.ready) - 1
+		if l < 0 {
+			goto Reentry
 		}
-
+		w = p.ready[l]
+		p.ready[l] = nil
+		p.ready = p.ready[:l]
+		p.mu.Unlock()
 	}
 
-	p.mu.Lock()
-	w = p.ready[0]
-	p.ready[0] = nil
-	p.ready = p.ready[1:]
-	p.mu.Unlock()
 	return w
 }
 
@@ -164,10 +186,10 @@ func WithRecovery(fn func()) {
 func (p *poolManager) clean(scratch *[]*worker) {
 	cleanTime := time.Now().Add(-p.workerMaxIdleTime)
 
-	p.mu.RLock()
+	p.mu.Lock()
 	n := len(p.ready)
 	if n == 0 {
-		p.mu.RUnlock()
+		p.mu.Unlock()
 		return
 	}
 	lo := 0
@@ -181,12 +203,10 @@ func (p *poolManager) clean(scratch *[]*worker) {
 		}
 	}
 	if p.ready[lo].lastUseTime.After(cleanTime) {
-		p.mu.RUnlock()
+		p.mu.Unlock()
 		return
 	}
-	p.mu.RUnlock()
 
-	p.mu.Lock()
 	//更新原切片，包括头信息中的长度
 	*scratch = append((*scratch)[:0], p.ready[0:hi+1]...)
 	m := copy(p.ready, p.ready[hi+1:])
@@ -205,10 +225,6 @@ func (p *poolManager) clean(scratch *[]*worker) {
 
 func (p *poolManager) Invoke(a any) {
 	w := p.getWorker()
-	for w == nil {
-		w = p.getWorker()
-		runtime.Gosched() //防止无限循环
-	}
 	w.ch <- a
 }
 
@@ -223,5 +239,5 @@ func (p *poolManager) Release() {
 	}
 
 	p.ready = nil
-	p.curWorkers.Store(0)
+	p.running = 0
 }

@@ -8,9 +8,11 @@ import (
 	"github.com/panjf2000/ants"
 )
 
+var num = 1000000
+
 func BenchmarkAntsPool(b *testing.B) {
 	// 创建一个协程池，包含1000个协程
-	p, _ := ants.NewPool(1000)
+	p, _ := ants.NewPool(num)
 	wg := sync.WaitGroup{}
 	defer p.Release()
 
@@ -31,11 +33,11 @@ func BenchmarkAntsPool(b *testing.B) {
 
 func BenchmarkWorkPool(b *testing.B) {
 	wg := sync.WaitGroup{}
-	wp := NewWithFunc(1000, func(a any) error {
+	wp := NewWithFunc(num, func(a any) error {
 		time.Sleep(100 * time.Millisecond)
 		wg.Done()
 		return nil
-	})
+	}, WithPreAlloc())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

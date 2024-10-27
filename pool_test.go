@@ -22,7 +22,6 @@ func TestNewWithFunc(t *testing.T) {
 	wg.Add(num - 1)
 	p := NewWithFunc(100, func(a any) error {
 		defer wg.Done()
-
 		i := a.(int)
 		sum.Add(int32(i))
 		return nil

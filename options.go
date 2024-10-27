@@ -13,3 +13,9 @@ func WithMaxIdleTime(t time.Duration) Option {
 		p.workerMaxIdleTime = t
 	}
 }
+
+func WithPreAlloc() Option {
+	return func(p *poolManager) {
+		p.ready = make([]*worker, 0, p.maxWorkers)
+	}
+}
