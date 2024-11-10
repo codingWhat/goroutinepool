@@ -2,6 +2,7 @@ package goroutinepool
 
 import (
 	"fmt"
+	"github.com/codingWhat/goroutinepool/lock"
 	"log"
 	"runtime"
 	"runtime/debug"
@@ -44,7 +45,7 @@ type poolManager struct {
 	ready             []*worker
 	blocking          int32
 	running           int32
-	mu                sync.RWMutex
+	mu                sync.Locker
 	cond              *sync.Cond
 
 	isStopped atomic.Bool
@@ -60,13 +61,14 @@ func NewWithFunc(size int, tf TaskFunc, options ...Option) Pool {
 		fn:                tf,
 		workerMaxIdleTime: 1 * time.Minute,
 		stopSig:           make(chan struct{}),
+		mu:                lock.NewSpinLock(),
 	}
 
 	for _, op := range options {
 		op(p)
 	}
 
-	p.cond = sync.NewCond(&p.mu)
+	p.cond = sync.NewCond(p.mu)
 
 	go WithRecovery(p.start)
 
